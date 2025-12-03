@@ -7,6 +7,7 @@ import android.content.Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
 import android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import androidx.documentfile.provider.DocumentFile
@@ -115,6 +116,10 @@ class MainActivity : FlutterActivity() {
                     try {
                         val permissions = getPersistedUriPermissions()
                         val uris = permissions.map { it.uri.toString() }
+                        android.util.Log.d("SAF", "Found ${uris.size} persisted URI permissions")
+                        uris.forEach { uri ->
+                            android.util.Log.d("SAF", "Persisted permission: $uri")
+                        }
                         result.success(uris)
                     } catch (e: Exception) {
                         result.error("ERROR", "Failed to check permissions: ${e.message}", null)
@@ -140,15 +145,63 @@ class MainActivity : FlutterActivity() {
                     if (directoryUri != null) {
                         try {
                             pendingDirectoryPickerResult = result
+                            val parsedUri = Uri.parse(directoryUri)
+                            
+                            android.util.Log.d("SAF", "Requesting directory access for: $parsedUri")
+                            
+                            // For EXTRA_INITIAL_URI, we need a document URI (not tree URI) for proper navigation
+                            // The picker will navigate to this location and show the "Allow access" button
+                            val navigationUri = if (DocumentsContract.isTreeUri(parsedUri)) {
+                                // If it's a tree URI, try to convert it to document URI for navigation
+                                // Tree URI format: content://authority/tree/documentId
+                                // Document URI format: content://authority/document/documentId
+                                try {
+                                    val treeDocId = DocumentsContract.getTreeDocumentId(parsedUri)
+                                    val docUri = DocumentsContract.buildDocumentUri(
+                                        parsedUri.authority,
+                                        treeDocId
+                                    )
+                                    android.util.Log.d("SAF", "Converted tree URI to document URI for navigation: $docUri")
+                                    docUri
+                                } catch (e: Exception) {
+                                    android.util.Log.w("SAF", "Could not convert tree URI to document URI: ${e.message}")
+                                    parsedUri // Fallback to original
+                                }
+                            } else {
+                                // Already a document URI - perfect for navigation
+                                parsedUri
+                            }
+                            
+                            android.util.Log.d("SAF", "Using navigation URI: $navigationUri")
+                            
+                            // For external storage, ensure we have the correct document URI format
+                            if (navigationUri.authority == "com.android.externalstorage.documents") {
+                                // The URI should already be correct, but log it for debugging
+                                android.util.Log.d("SAF", "External storage document URI format verified")
+                            }
+                            
                             // Open directory tree picker, but try to navigate to the specific directory
                             val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
                                 flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or
                                         Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
-                                // Try to set the initial URI if possible
-                                putExtra(DocumentsContract.EXTRA_INITIAL_URI, Uri.parse(directoryUri))
+                                // EXTRA_INITIAL_URI was added in API 26 (Android 8.0)
+                                // This helps navigate to the specific subfolder on supported versions
+                                // Note: EXTRA_INITIAL_URI works better with document URIs for navigation
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                    try {
+                                        putExtra(DocumentsContract.EXTRA_INITIAL_URI, navigationUri)
+                                        android.util.Log.d("SAF", "Set EXTRA_INITIAL_URI to: $navigationUri")
+                                    } catch (e: Exception) {
+                                        android.util.Log.w("SAF", "Could not set EXTRA_INITIAL_URI: ${e.message}")
+                                        // Continue without initial URI - user will need to navigate manually
+                                    }
+                                } else {
+                                    android.util.Log.d("SAF", "EXTRA_INITIAL_URI not available on API ${Build.VERSION.SDK_INT}")
+                                }
                             }
                             startActivityForResult(intent, DIRECTORY_PICKER_REQUEST_CODE)
                         } catch (e: Exception) {
+                            android.util.Log.e("SAF", "Error requesting directory access: ${e.message}", e)
                             result.error("ERROR", "Failed to request directory access: ${e.message}", null)
                             pendingDirectoryPickerResult = null
                         }
@@ -186,9 +239,12 @@ class MainActivity : FlutterActivity() {
                 // Try to get parent directory
                 val parentFile = documentFile.parentFile
                 if (parentFile == null || !parentFile.exists()) {
-                    android.util.Log.e("SAF", "Parent file is null or doesn't exist")
-                    // If no parent accessible, return just this file
-                    return listOf(fileUri.toString())
+                    android.util.Log.w("SAF", "Parent file is null or doesn't exist via DocumentFile API")
+                    android.util.Log.d("SAF", "This means we need to request tree access for the parent directory")
+                    
+                    // Return empty list to indicate parent access failed
+                    // This will trigger the tree access request flow
+                    return emptyList()
                 }
 
                 android.util.Log.d("SAF", "Parent file exists: ${parentFile.uri}, isDirectory: ${parentFile.isDirectory}")
@@ -310,8 +366,42 @@ class MainActivity : FlutterActivity() {
 
     private fun getAllFilesFromDownloadsProvider(fileUri: Uri): List<String> {
         try {
-            android.util.Log.d("SAF", "Handling Downloads provider URI")
+            android.util.Log.d("SAF", "Handling Downloads provider URI: $fileUri")
             
+            // First, try using DocumentFile API directly (works better on Android 11+)
+            // This is the preferred method as it uses SAF permissions we already have
+            try {
+                val documentFile = DocumentFile.fromSingleUri(this, fileUri)
+                if (documentFile != null && documentFile.exists()) {
+                    val parentFile = documentFile.parentFile
+                    if (parentFile != null && parentFile.exists() && parentFile.isDirectory) {
+                        android.util.Log.d("SAF", "Using DocumentFile API to access parent directory")
+                        val files = mutableListOf<String>()
+                        try {
+                            val children = parentFile.listFiles()
+                            android.util.Log.d("SAF", "Found ${children?.size ?: 0} children via DocumentFile")
+                            if (children != null) {
+                                for (child in children) {
+                                    if (child.isFile) {
+                                        android.util.Log.d("SAF", "Found file via DocumentFile: ${child.name}")
+                                        files.add(child.uri.toString())
+                                    }
+                                }
+                            }
+                            if (files.isNotEmpty()) {
+                                android.util.Log.d("SAF", "Successfully listed ${files.size} files using DocumentFile API")
+                                return files
+                            }
+                        } catch (e: Exception) {
+                            android.util.Log.w("SAF", "DocumentFile API failed: ${e.message}, trying fallback")
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("SAF", "DocumentFile approach failed: ${e.message}, trying fallback")
+            }
+            
+            // Fallback: Try using document ID parsing (for Android 9/10 compatibility)
             // Get the document ID from the URI
             val docId = DocumentsContract.getDocumentId(fileUri)
             android.util.Log.d("SAF", "Document ID: $docId")
@@ -325,7 +415,7 @@ class MainActivity : FlutterActivity() {
                 val file = File(filePath)
                 if (!file.exists()) {
                     android.util.Log.e("SAF", "File does not exist: $filePath")
-                    return emptyList()
+                    return listOf(fileUri.toString())
                 }
                 
                 val parentDir = file.parentFile
@@ -343,9 +433,13 @@ class MainActivity : FlutterActivity() {
                 // Since ContentResolver requires tree access which we don't have,
                 // we'll use MediaStore API to query files, then fallback to File API
                 try {
-                    // Try MediaStore API first (works for Downloads folder on Android 10+)
                     val directoryPath = parentDir.absolutePath
                     android.util.Log.d("SAF", "Querying MediaStore for directory: $directoryPath")
+                    
+                    // MediaStore API behavior differs by Android version:
+                    // - Android 9 and below: Full access via MediaStore
+                    // - Android 10+: Scoped storage limits MediaStore access
+                    // - Android 11+: Downloads root access restricted, but subfolders accessible
                     
                     val projection = arrayOf(
                         MediaStore.Files.FileColumns._ID,
@@ -354,6 +448,7 @@ class MainActivity : FlutterActivity() {
                     )
                     
                     // Query all files in the directory
+                    // Note: On Android 10+, MediaStore may not return all files due to scoped storage
                     val selection = "${MediaStore.Files.FileColumns.DATA} LIKE ?"
                     val selectionArgs = arrayOf("$directoryPath/%")
                     
@@ -392,6 +487,8 @@ class MainActivity : FlutterActivity() {
                     } else {
                         android.util.Log.w("SAF", "MediaStore query returned null or empty, trying File API")
                         // Fallback to File API
+                        // Note: On Android 10+, direct file access may be restricted
+                        // This fallback works better on Android 9 and below
                         try {
                             val children = parentDir.listFiles()
                             if (children != null) {
@@ -408,15 +505,20 @@ class MainActivity : FlutterActivity() {
                                             files.add(childUri.toString())
                                         } catch (e: Exception) {
                                             android.util.Log.w("SAF", "Could not build URI for ${child.name}, using path")
+                                            // On Android 10+, if File API fails, we might need SAF tree access
                                             files.add(child.absolutePath)
                                         }
                                     }
                                 }
                             } else {
                                 android.util.Log.e("SAF", "File API also returned null")
+                                // On Android 11+, this might fail for Downloads subfolders
+                                // User will need to grant tree access via SAF
                             }
                         } catch (e: Exception) {
                             android.util.Log.e("SAF", "Error using File API: ${e.message}", e)
+                            // On Android 10+, this is expected for restricted directories
+                            // The app should request tree access via SAF instead
                         }
                     }
                 } catch (e: Exception) {
@@ -461,6 +563,19 @@ class MainActivity : FlutterActivity() {
             if (resultCode == Activity.RESULT_OK && data != null) {
                 val uri = data.data
                 if (uri != null && pendingFilePickerResult != null) {
+                    // Take persistable URI permission for the picked file
+                    // This allows us to access the file and its parent directory later
+                    try {
+                        contentResolver.takePersistableUriPermission(
+                            uri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        )
+                        android.util.Log.d("SAF", "Persistent permission granted for picked file: $uri")
+                    } catch (e: Exception) {
+                        android.util.Log.w("SAF", "Could not take persistable permission: ${e.message}")
+                        // Continue anyway - some URIs might not support persistable permissions
+                    }
+                    
                     // Return the original SAF URI
                     pendingFilePickerResult?.success(uri.toString())
                     pendingFilePickerResult = null
@@ -505,44 +620,177 @@ class MainActivity : FlutterActivity() {
     private fun listFilesInDirectoryTree(treeUriString: String): List<String> {
         val files = mutableListOf<String>()
         try {
-            val treeUri = Uri.parse(treeUriString)
-            android.util.Log.d("SAF", "Listing files in directory tree: $treeUri")
+            val requestedUri = Uri.parse(treeUriString)
+            android.util.Log.d("SAF", "Listing files in directory tree: $requestedUri")
+            
+            // Check if we have an existing tree permission that covers this directory
+            val matchingTreeUri = findMatchingTreePermission(requestedUri)
+            
+            // Ensure we have a tree URI
+            val actualTreeUri = if (DocumentsContract.isTreeUri(requestedUri)) {
+                requestedUri
+            } else {
+                // Try to convert document URI to tree URI
+                convertDocumentUriToTreeUri(requestedUri) ?: requestedUri
+            }
+            
+            // Use matching tree URI if available (might be Downloads root covering subfolders)
+            val treeUriToUse = matchingTreeUri ?: actualTreeUri
+            
+            android.util.Log.d("SAF", "Using tree URI: $treeUriToUse")
             
             // Use DocumentFile to access the tree
-            val treeDocumentFile = DocumentFile.fromTreeUri(this, treeUri)
-            if (treeDocumentFile == null || !treeDocumentFile.exists() || !treeDocumentFile.isDirectory) {
-                android.util.Log.e("SAF", "Tree URI is invalid or not a directory")
+            val treeDocumentFile = DocumentFile.fromTreeUri(this, treeUriToUse)
+            if (treeDocumentFile == null || !treeDocumentFile.exists()) {
+                android.util.Log.e("SAF", "Tree URI is invalid or doesn't exist")
                 return emptyList()
             }
             
-            // List all files recursively (or just direct children)
-            listFilesRecursive(treeDocumentFile, files)
+            if (!treeDocumentFile.isDirectory) {
+                android.util.Log.e("SAF", "Tree URI is not a directory")
+                return emptyList()
+            }
             
-            android.util.Log.d("SAF", "Found ${files.size} files in directory")
+            android.util.Log.d("SAF", "Tree directory exists: ${treeDocumentFile.name}, canRead: ${treeDocumentFile.canRead()}")
+            
+            // If we're using a parent tree (e.g., Downloads root) but need to access a subfolder,
+            // we need to navigate to the subfolder first
+            val targetDirectory = if (matchingTreeUri != null && matchingTreeUri != actualTreeUri) {
+                // We have Downloads root access but need to access a subfolder
+                // Try to find the subfolder within the tree
+                val targetDocId = if (DocumentsContract.isTreeUri(requestedUri)) {
+                    DocumentsContract.getTreeDocumentId(requestedUri)
+                } else {
+                    DocumentsContract.getDocumentId(requestedUri)
+                }
+                
+                // Navigate to the subfolder within the tree
+                findSubfolderInTree(treeDocumentFile, targetDocId) ?: treeDocumentFile
+            } else {
+                treeDocumentFile
+            }
+            
+            // List all files recursively (including subfolders)
+            listFilesRecursive(targetDirectory, files)
+            
+            android.util.Log.d("SAF", "Found ${files.size} files in directory tree")
             return files
         } catch (e: Exception) {
             android.util.Log.e("SAF", "Error listing files: ${e.message}", e)
+            e.printStackTrace()
             return emptyList()
         }
     }
-
-    private fun listFilesRecursive(documentFile: DocumentFile, files: MutableList<String>) {
+    
+    /**
+     * Find a subfolder within a tree DocumentFile by matching document ID
+     */
+    private fun findSubfolderInTree(treeDocumentFile: DocumentFile, targetDocId: String): DocumentFile? {
         try {
-            val children = documentFile.listFiles()
+            // For Downloads provider with raw:/ paths, extract the path
+            if (targetDocId.startsWith("raw:/")) {
+                val targetPath = targetDocId.substring(4)
+                return findSubfolderByPath(treeDocumentFile, targetPath)
+            }
+            
+            // For other providers, try to match by name/path
+            val children = treeDocumentFile.listFiles()
             if (children != null) {
                 for (child in children) {
-                    if (child.isFile) {
-                        // Add file URI
-                        files.add(child.uri.toString())
-                        android.util.Log.d("SAF", "Found file: ${child.name}")
-                    } else if (child.isDirectory) {
-                        // Recursively list files in subdirectories
-                        listFilesRecursive(child, files)
+                    if (child.isDirectory) {
+                        // Try to get document ID for this child
+                        try {
+                            val childDocId = DocumentsContract.getDocumentId(child.uri)
+                            if (childDocId == targetDocId || targetDocId.endsWith(childDocId)) {
+                                return child
+                            }
+                            // Recursively search in subdirectories
+                            val found = findSubfolderInTree(child, targetDocId)
+                            if (found != null) {
+                                return found
+                            }
+                        } catch (e: Exception) {
+                            // Continue searching
+                        }
                     }
                 }
             }
         } catch (e: Exception) {
-            android.util.Log.e("SAF", "Error listing files recursively: ${e.message}", e)
+            android.util.Log.e("SAF", "Error finding subfolder: ${e.message}", e)
+        }
+        return null
+    }
+    
+    /**
+     * Find a subfolder by matching file path (for Downloads provider)
+     */
+    private fun findSubfolderByPath(treeDocumentFile: DocumentFile, targetPath: String): DocumentFile? {
+        try {
+            val children = treeDocumentFile.listFiles()
+            if (children != null) {
+                for (child in children) {
+                    if (child.isDirectory) {
+                        try {
+                            val childDocId = DocumentsContract.getDocumentId(child.uri)
+                            if (childDocId.startsWith("raw:/")) {
+                                val childPath = childDocId.substring(4)
+                                if (targetPath == childPath || targetPath.startsWith(childPath + "/")) {
+                                    if (targetPath == childPath) {
+                                        return child
+                                    } else {
+                                        // Continue searching in this subfolder
+                                        val found = findSubfolderByPath(child, targetPath)
+                                        if (found != null) {
+                                            return found
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (e: Exception) {
+                            // Continue searching
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("SAF", "Error finding subfolder by path: ${e.message}", e)
+        }
+        return null
+    }
+
+    private fun listFilesRecursive(documentFile: DocumentFile, files: MutableList<String>) {
+        try {
+            if (!documentFile.exists() || !documentFile.canRead()) {
+                android.util.Log.w("SAF", "Cannot read directory: ${documentFile.name}")
+                return
+            }
+            
+            val children = documentFile.listFiles()
+            if (children != null) {
+                android.util.Log.d("SAF", "Listing ${children.size} items in: ${documentFile.name}")
+                for (child in children) {
+                    try {
+                        if (child.isFile) {
+                            // Add file URI
+                            files.add(child.uri.toString())
+                            android.util.Log.d("SAF", "Found file: ${child.name}")
+                        } else if (child.isDirectory) {
+                            android.util.Log.d("SAF", "Entering subdirectory: ${child.name}")
+                            // Recursively list files in subdirectories
+                            // This is crucial for accessing files in subfolders
+                            listFilesRecursive(child, files)
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.w("SAF", "Error processing item ${child.name}: ${e.message}")
+                        // Continue with next item instead of stopping
+                    }
+                }
+            } else {
+                android.util.Log.w("SAF", "listFiles() returned null for: ${documentFile.name}")
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("SAF", "Error listing files recursively in ${documentFile.name}: ${e.message}", e)
+            // Don't throw - just log and continue
         }
     }
 
@@ -561,8 +809,29 @@ class MainActivity : FlutterActivity() {
                 val parentFile = documentFile.parentFile
                 if (parentFile != null && parentFile.exists()) {
                     val parentUri = parentFile.uri
-                    android.util.Log.d("SAF", "Parent directory URI: $parentUri")
+                    android.util.Log.d("SAF", "Parent directory URI (document): $parentUri")
+                    
+                    // Convert document URI to tree URI for proper directory access
+                    val treeUri = convertDocumentUriToTreeUri(parentUri)
+                    if (treeUri != null) {
+                        android.util.Log.d("SAF", "Converted to tree URI: $treeUri")
+                        return treeUri.toString()
+                    }
+                    
+                    // Fallback: return document URI (will need conversion later)
                     return parentUri.toString()
+                } else {
+                    android.util.Log.d("SAF", "Parent file not accessible via DocumentFile, building from document ID")
+                }
+            }
+            
+            // For external storage documents, build parent tree URI from document ID
+            if (fileUri.authority == "com.android.externalstorage.documents") {
+                android.util.Log.d("SAF", "Building parent tree URI for external storage")
+                val parentTreeUri = buildParentTreeUriForExternalStorage(fileUri)
+                if (parentTreeUri != null) {
+                    android.util.Log.d("SAF", "Built parent tree URI: $parentTreeUri")
+                    return parentTreeUri.toString()
                 }
             }
             
@@ -582,6 +851,22 @@ class MainActivity : FlutterActivity() {
                         android.util.Log.d("SAF", "Built parent tree URI: $parentTreeUri")
                         return parentTreeUri.toString()
                     }
+                } else {
+                    // Handle non-raw document IDs
+                    // Try to extract parent document ID
+                    try {
+                        val parentDocId = DocumentsContract.getTreeDocumentId(fileUri)
+                        if (parentDocId != null && parentDocId.isNotEmpty()) {
+                            val parentTreeUri = DocumentsContract.buildTreeDocumentUri(
+                                fileUri.authority,
+                                parentDocId
+                            )
+                            android.util.Log.d("SAF", "Built parent tree URI from tree doc ID: $parentTreeUri")
+                            return parentTreeUri.toString()
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.d("SAF", "Could not get tree document ID: ${e.message}")
+                    }
                 }
             }
             
@@ -590,5 +875,102 @@ class MainActivity : FlutterActivity() {
             android.util.Log.e("SAF", "Error getting parent directory: ${e.message}", e)
             return null
         }
+    }
+    
+    /**
+     * Build parent tree URI for external storage documents
+     * Document ID format: "primary:Download/Update/filename.json"
+     * We need to extract "primary:Download/Update" and build tree URI
+     */
+    private fun buildParentTreeUriForExternalStorage(fileUri: Uri): Uri? {
+        try {
+            val docId = DocumentsContract.getDocumentId(fileUri)
+            android.util.Log.d("SAF", "Document ID: $docId")
+            
+            // Document ID format: "primary:Download/Update/filename.json"
+            // We need to get parent: "primary:Download/Update"
+            if (docId.contains("/")) {
+                val lastSlashIndex = docId.lastIndexOf("/")
+                if (lastSlashIndex > 0) {
+                    val parentDocId = docId.substring(0, lastSlashIndex)
+                    android.util.Log.d("SAF", "Parent document ID: $parentDocId")
+                    
+                    // Build tree URI for parent directory
+                    val parentTreeUri = DocumentsContract.buildTreeDocumentUri(
+                        fileUri.authority,
+                        parentDocId
+                    )
+                    android.util.Log.d("SAF", "Built parent tree URI: $parentTreeUri")
+                    return parentTreeUri
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("SAF", "Error building parent tree URI: ${e.message}", e)
+        }
+        return null
+    }
+    
+    /**
+     * Convert a document URI to a tree URI for directory access
+     */
+    private fun convertDocumentUriToTreeUri(documentUri: Uri): Uri? {
+        try {
+            // If it's already a tree URI, return it
+            if (DocumentsContract.isTreeUri(documentUri)) {
+                return documentUri
+            }
+            
+            // Get the document ID
+            val docId = DocumentsContract.getDocumentId(documentUri)
+            if (docId.isNotEmpty()) {
+                // Build tree URI from document ID
+                val treeUri = DocumentsContract.buildTreeDocumentUri(
+                    documentUri.authority,
+                    docId
+                )
+                android.util.Log.d("SAF", "Converted document URI $documentUri to tree URI $treeUri")
+                return treeUri
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("SAF", "Error converting document URI to tree URI: ${e.message}", e)
+        }
+        return null
+    }
+    
+    /**
+     * Check if a directory URI is accessible through an existing tree permission
+     */
+    private fun findMatchingTreePermission(directoryUri: Uri): Uri? {
+        try {
+            val persistedPermissions = contentResolver.persistedUriPermissions
+            val directoryDocId = DocumentsContract.getDocumentId(directoryUri)
+            
+            for (permission in persistedPermissions) {
+                val treeUri = permission.uri
+                if (DocumentsContract.isTreeUri(treeUri)) {
+                    val treeDocId = DocumentsContract.getTreeDocumentId(treeUri)
+                    
+                    // Check if the directory is within the tree permission
+                    // For Downloads provider with raw:/ paths
+                    if (directoryUri.authority == treeUri.authority) {
+                        if (directoryDocId.startsWith("raw:/") && treeDocId.startsWith("raw:/")) {
+                            val dirPath = directoryDocId.substring(4)
+                            val treePath = treeDocId.substring(4)
+                            if (dirPath.startsWith(treePath)) {
+                                android.util.Log.d("SAF", "Found matching tree permission: $treeUri")
+                                return treeUri
+                            }
+                        } else if (directoryDocId.startsWith(treeDocId)) {
+                            // For other providers, check if directory ID starts with tree ID
+                            android.util.Log.d("SAF", "Found matching tree permission: $treeUri")
+                            return treeUri
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("SAF", "Error finding matching tree permission: ${e.message}", e)
+        }
+        return null
     }
 }

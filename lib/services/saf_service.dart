@@ -243,53 +243,87 @@ class SafService {
         };
       }
 
-      // Step 3: Get parent directory URI from the picked file
-      print('Getting parent directory URI...');
-      String? parentDirectoryUri = await getParentDirectoryUri(fileUri);
+      // Step 3: Try to list files directly from the picked file's directory
+      // This works because we already have access to the picked file
+      print('Attempting to list files directly from picked file directory...');
+      List<String> allFiles = await getAllFilesFromDirectory(fileUri);
       
-      if (parentDirectoryUri == null || parentDirectoryUri.isEmpty) {
-        return {
-          'success': false,
-          'error': 'Could not determine parent directory',
-          'jsonData': jsonData,
-          'files': [],
-          'jsonFilePath': fileUri,
-        };
-      }
-
-      print('Parent directory URI: $parentDirectoryUri');
-
-      // Step 4: Check if we already have permission for this directory
-      final existingPermissions = await checkExistingPermissions();
-      bool hasPermission = existingPermissions.any((uri) => 
-        uri == parentDirectoryUri || parentDirectoryUri.contains(uri) || uri.contains(parentDirectoryUri)
-      );
-
-      String? directoryTreeUri = parentDirectoryUri;
-
-      if (!hasPermission) {
-        // Step 5: Request directory tree access for the parent directory
-        print('No existing permission found, requesting directory access...');
-        directoryTreeUri = await requestDirectoryAccess(parentDirectoryUri);
-        
-        if (directoryTreeUri == null || directoryTreeUri.isEmpty) {
-          return {
-            'success': false,
-            'error': 'Directory access was not granted',
-            'jsonData': jsonData,
-            'files': [],
-            'jsonFilePath': fileUri,
-          };
-        }
-        print('Directory access granted: $directoryTreeUri');
+      // Check if we only got the picked file itself (meaning parent access failed)
+      bool onlyPickedFile = allFiles.length == 1 && allFiles.first == fileUri;
+      
+      // If we got multiple files directly, use them (this works when parentFile is accessible)
+      if (allFiles.isNotEmpty && !onlyPickedFile) {
+        print('Successfully listed ${allFiles.length} files directly from directory');
       } else {
-        print('Using existing permission for directory');
-      }
+        // If we only got the picked file, parent access failed - need to request tree access
+        print('Direct listing only returned picked file, parent access unavailable');
+        // Step 4: If direct listing failed, try getting parent directory URI
+        print('Direct listing failed, getting parent directory URI...');
+        String? parentDirectoryUri = await getParentDirectoryUri(fileUri);
+        
+        if (parentDirectoryUri == null || parentDirectoryUri.isEmpty) {
+          print('Could not determine parent directory, returning only picked file');
+          allFiles = [fileUri]; // At least return the picked file
+        } else {
+          print('Parent directory URI: $parentDirectoryUri');
 
-      // Step 6: List all files in the directory
-      print('Listing files in directory...');
-      final allFiles = await listFilesInDirectory(directoryTreeUri);
-      print('Found ${allFiles.length} files in directory');
+          // Step 5: Check if we already have permission for this directory
+          final existingPermissions = await checkExistingPermissions();
+          bool hasPermission = existingPermissions.any((uri) {
+            // Check for exact match
+            if (uri == parentDirectoryUri) return true;
+            
+            // Check if parentDirectoryUri is a subdirectory of an existing permission
+            // For tree URIs, we need to check if the parent is within the granted tree
+            try {
+              // Normalize URIs for comparison (remove trailing slashes, etc.)
+              final normalizedParent = parentDirectoryUri.replaceAll(RegExp(r'/$'), '');
+              final normalizedExisting = uri.replaceAll(RegExp(r'/$'), '');
+              
+              // Check if parent is within the existing tree permission
+              // Tree URIs typically end with :tree/documentId
+              if (normalizedParent.startsWith(normalizedExisting) || 
+                  normalizedExisting.startsWith(normalizedParent)) {
+                return true;
+              }
+            } catch (e) {
+              print('Error comparing URIs: $e');
+            }
+            
+            return false;
+          });
+
+          String? directoryTreeUri = parentDirectoryUri;
+
+          if (!hasPermission) {
+            // Step 6: Request directory tree access for the parent directory
+            print('No existing permission found, requesting directory access...');
+            print('Parent directory URI to request: $parentDirectoryUri');
+            
+            // Add a small delay to ensure the previous picker is fully closed
+            await Future.delayed(const Duration(milliseconds: 300));
+            
+            directoryTreeUri = await requestDirectoryAccess(parentDirectoryUri);
+            
+            if (directoryTreeUri == null || directoryTreeUri.isEmpty) {
+              print('Directory access was not granted, returning only picked file');
+              allFiles = [fileUri]; // At least return the picked file
+            } else {
+              print('Directory access granted: $directoryTreeUri');
+              // Step 7: List all files in the directory using tree URI
+              print('Listing files in directory tree...');
+              allFiles = await listFilesInDirectory(directoryTreeUri);
+              print('Found ${allFiles.length} files in directory');
+            }
+          } else {
+            print('Using existing permission for directory');
+            // Step 7: List all files in the directory using existing permission
+            print('Listing files in directory...');
+            allFiles = await listFilesInDirectory(directoryTreeUri);
+            print('Found ${allFiles.length} files in directory');
+          }
+        }
+      }
 
       return {
         'success': true,
@@ -297,7 +331,6 @@ class SafService {
         'jsonData': jsonData,
         'files': allFiles,
         'jsonFilePath': fileUri,
-        'directoryUri': directoryTreeUri,
       };
     } catch (e) {
       print('Error in processJsonAndGetFiles: $e');
