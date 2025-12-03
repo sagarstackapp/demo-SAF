@@ -11,7 +11,15 @@ class SafService {
     try {
       if (Platform.isAndroid) {
         print('Calling native SAF picker...');
-        final String? uri = await _channel.invokeMethod('pickFileWithSAF');
+        // Add timeout to detect if picker doesn't return
+        final String? uri = await _channel.invokeMethod('pickFileWithSAF')
+            .timeout(
+              const Duration(seconds: 60),
+              onTimeout: () {
+                print('File picker timeout - user may have cancelled or folder was empty');
+                return null;
+              },
+            );
         print('Native SAF picker returned: $uri');
         return uri;
       } else {
@@ -223,7 +231,7 @@ class SafService {
       if (fileUri == null || fileUri.isEmpty) {
         return {
           'success': false,
-          'error': 'No file selected',
+          'error': 'No file selected. If you tried to access Downloads subfolder from the side menu and saw an empty folder, please try navigating through: Mobile > Download > [your subfolder] instead.',
           'jsonData': null,
           'files': [],
         };

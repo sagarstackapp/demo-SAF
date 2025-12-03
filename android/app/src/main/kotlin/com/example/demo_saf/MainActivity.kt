@@ -25,6 +25,51 @@ class MainActivity : FlutterActivity() {
     private var pendingDirectoryPickerResult: MethodChannel.Result? = null
     private val FILE_PICKER_REQUEST_CODE = 1001
     private val DIRECTORY_PICKER_REQUEST_CODE = 1002
+    
+    override fun onCreate(savedInstanceState: android.os.Bundle?) {
+        super.onCreate(savedInstanceState)
+        android.util.Log.d("SAF", "MainActivity onCreate")
+    }
+    
+    override fun onResume() {
+        super.onResume()
+        android.util.Log.d("SAF", "MainActivity onResume")
+        // Check if we have pending results that might have been lost
+        // If we come back from file picker and no result was received, it was likely cancelled
+        if (pendingFilePickerResult != null) {
+            android.util.Log.d("SAF", "Pending file picker result exists on resume - checking if picker was cancelled")
+            // Wait a bit to see if onActivityResult gets called
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                if (pendingFilePickerResult != null) {
+                    android.util.Log.w("SAF", "File picker result still pending after resume delay - likely cancelled")
+                    // Don't error here - let onActivityResult handle it if it comes
+                }
+            }, 500)
+        }
+        if (pendingDirectoryPickerResult != null) {
+            android.util.Log.d("SAF", "Pending directory picker result exists on resume")
+        }
+    }
+    
+    override fun onPause() {
+        super.onPause()
+        android.util.Log.d("SAF", "MainActivity onPause")
+    }
+    
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        android.util.Log.d("SAF", "MainActivity onNewIntent: $intent")
+    }
+    
+    override fun onSaveInstanceState(outState: android.os.Bundle) {
+        super.onSaveInstanceState(outState)
+        android.util.Log.d("SAF", "MainActivity onSaveInstanceState")
+    }
+    
+    override fun onRestoreInstanceState(savedInstanceState: android.os.Bundle) {
+        super.onRestoreInstanceState(savedInstanceState)
+        android.util.Log.d("SAF", "MainActivity onRestoreInstanceState")
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -71,14 +116,44 @@ class MainActivity : FlutterActivity() {
                 }
                 "pickFileWithSAF" -> {
                     // Native SAF file picker that returns original URI
+                    // Navigate directly to Mobile/Download to avoid Downloads side menu restrictions
                     try {
+                        android.util.Log.d("SAF", "Setting up file picker - pendingFilePickerResult set")
                         pendingFilePickerResult = result
+                        
+                        // Build URI for Mobile/Download path (external storage)
+                        // This bypasses the Downloads side menu which is restricted on Android 11+
+                        val downloadUri = try {
+                            // External storage Downloads folder: "primary:Download"
+                            DocumentsContract.buildDocumentUri(
+                                "com.android.externalstorage.documents",
+                                "primary:Download"
+                            )
+                        } catch (e: Exception) {
+                            android.util.Log.w("SAF", "Could not build Download URI: ${e.message}")
+                            null
+                        }
+                        
                         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                             addCategory(Intent.CATEGORY_OPENABLE)
                             type = "*/*" // Allow all file types
+                            
+                            // Navigate directly to Mobile/Download folder
+                            // This avoids the Downloads side menu which shows empty folders on Android 11+
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && downloadUri != null) {
+                                try {
+                                    putExtra(DocumentsContract.EXTRA_INITIAL_URI, downloadUri)
+                                    android.util.Log.d("SAF", "Set EXTRA_INITIAL_URI to navigate to Mobile/Download: $downloadUri")
+                                } catch (e: Exception) {
+                                    android.util.Log.w("SAF", "Could not set EXTRA_INITIAL_URI: ${e.message}")
+                                }
+                            }
                         }
+                        android.util.Log.d("SAF", "Starting file picker activity with request code: $FILE_PICKER_REQUEST_CODE")
                         startActivityForResult(intent, FILE_PICKER_REQUEST_CODE)
+                        android.util.Log.d("SAF", "File picker activity started")
                     } catch (e: Exception) {
+                        android.util.Log.e("SAF", "Error starting file picker: ${e.message}", e)
                         result.error("ERROR", "Failed to start file picker: ${e.message}", null)
                         pendingFilePickerResult = null
                     }
@@ -220,12 +295,21 @@ class MainActivity : FlutterActivity() {
         try {
             // Check if it's a content:// URI (SAF) or a regular file path
             if (filePath.startsWith("content://")) {
-                val fileUri = Uri.parse(filePath)
+                var fileUri = Uri.parse(filePath)
                 android.util.Log.d("SAF", "Processing URI: $fileUri")
                 
-                // Check if it's a Downloads provider URI
+                // Convert Downloads provider URI to external storage provider URI immediately
+                // This ensures we use the Mobile > Download path instead of Downloads side menu
                 if (fileUri.authority == "com.android.providers.downloads.documents") {
-                    return getAllFilesFromDownloadsProvider(fileUri)
+                    android.util.Log.d("SAF", "Downloads provider detected, converting to external storage provider")
+                    val convertedUri = convertDownloadsProviderToExternalStorage(fileUri)
+                    if (convertedUri != null) {
+                        android.util.Log.d("SAF", "Using converted external storage URI: $convertedUri")
+                        fileUri = convertedUri
+                    } else {
+                        android.util.Log.w("SAF", "Could not convert, using Downloads provider fallback")
+                        return getAllFilesFromDownloadsProvider(fileUri)
+                    }
                 }
                 
                 // Use DocumentFile API for other SAF URIs
@@ -376,24 +460,77 @@ class MainActivity : FlutterActivity() {
                     val parentFile = documentFile.parentFile
                     if (parentFile != null && parentFile.exists() && parentFile.isDirectory) {
                         android.util.Log.d("SAF", "Using DocumentFile API to access parent directory")
-                        val files = mutableListOf<String>()
-                        try {
-                            val children = parentFile.listFiles()
-                            android.util.Log.d("SAF", "Found ${children?.size ?: 0} children via DocumentFile")
-                            if (children != null) {
-                                for (child in children) {
-                                    if (child.isFile) {
-                                        android.util.Log.d("SAF", "Found file via DocumentFile: ${child.name}")
-                                        files.add(child.uri.toString())
+                        
+                        // Check if parent is Downloads root (restricted on Android 11+)
+                        val parentDocId = try {
+                            DocumentsContract.getDocumentId(parentFile.uri)
+                        } catch (e: Exception) {
+                            null
+                        }
+                        
+                        // On Android 11+, Downloads root access is restricted
+                        // If parent is Downloads root, we might not be able to list files
+                        val isDownloadsRoot = parentDocId?.let { 
+                            it == "downloads" || it == "msf:downloads" || it.contains("downloads") && !it.contains("/")
+                        } ?: false
+                        
+                        if (isDownloadsRoot && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                            android.util.Log.w("SAF", "Downloads root access restricted on Android 11+, using MediaStore fallback")
+                            // Fall through to MediaStore/File API fallback
+                        } else {
+                            val files = mutableListOf<String>()
+                            try {
+                                val children = parentFile.listFiles()
+                                android.util.Log.d("SAF", "Found ${children?.size ?: 0} children via DocumentFile")
+                                if (children != null) {
+                                    for (child in children) {
+                                        if (child.isFile) {
+                                            android.util.Log.d("SAF", "Found file via DocumentFile: ${child.name}")
+                                            files.add(child.uri.toString())
+                                        }
                                     }
                                 }
+                                if (files.isNotEmpty()) {
+                                    android.util.Log.d("SAF", "Successfully listed ${files.size} files using DocumentFile API")
+                                    return files
+                                }
+                            } catch (e: Exception) {
+                                android.util.Log.w("SAF", "DocumentFile API failed: ${e.message}, trying fallback")
                             }
-                            if (files.isNotEmpty()) {
-                                android.util.Log.d("SAF", "Successfully listed ${files.size} files using DocumentFile API")
-                                return files
+                        }
+                    } else {
+                        android.util.Log.d("SAF", "Parent file not accessible, might be Downloads root")
+                        // Try converting Downloads provider to external storage provider
+                        // This works better on Android 11+ where Downloads provider is restricted
+                        android.util.Log.d("SAF", "Attempting to convert Downloads provider to external storage provider")
+                        val externalStorageUri = convertDownloadsProviderToExternalStorage(fileUri)
+                        if (externalStorageUri != null) {
+                            android.util.Log.d("SAF", "Converted to external storage URI, trying to access parent")
+                            // Try to get parent using external storage URI
+                            val externalDocFile = DocumentFile.fromSingleUri(this, externalStorageUri)
+                            val externalParentFile = externalDocFile?.parentFile
+                            if (externalParentFile != null && externalParentFile.exists() && externalParentFile.isDirectory) {
+                                android.util.Log.d("SAF", "Successfully accessed parent via external storage provider")
+                                val files = mutableListOf<String>()
+                                try {
+                                    val children = externalParentFile.listFiles()
+                                    android.util.Log.d("SAF", "Found ${children?.size ?: 0} children via external storage provider")
+                                    if (children != null) {
+                                        for (child in children) {
+                                            if (child.isFile) {
+                                                android.util.Log.d("SAF", "Found file via external storage: ${child.name}")
+                                                files.add(child.uri.toString())
+                                            }
+                                        }
+                                    }
+                                    if (files.isNotEmpty()) {
+                                        android.util.Log.d("SAF", "Successfully listed ${files.size} files using external storage provider")
+                                        return files
+                                    }
+                                } catch (e: Exception) {
+                                    android.util.Log.w("SAF", "External storage provider failed: ${e.message}")
+                                }
                             }
-                        } catch (e: Exception) {
-                            android.util.Log.w("SAF", "DocumentFile API failed: ${e.message}, trying fallback")
                         }
                     }
                 }
@@ -424,7 +561,13 @@ class MainActivity : FlutterActivity() {
                     return listOf(fileUri.toString())
                 }
                 
+                // Check if parent is Downloads root directory
+                val isDownloadsRoot = parentDir.absolutePath.endsWith("/Download") || 
+                                     parentDir.absolutePath.endsWith("/Downloads") ||
+                                     parentDir.absolutePath.contains("/Download") && !parentDir.absolutePath.contains("/Download/")
+                
                 android.util.Log.d("SAF", "Listing files in directory: ${parentDir.absolutePath}")
+                android.util.Log.d("SAF", "Is Downloads root: $isDownloadsRoot")
                 android.util.Log.d("SAF", "Directory exists: ${parentDir.exists()}, isDirectory: ${parentDir.isDirectory}, canRead: ${parentDir.canRead()}")
                 
                 val files = mutableListOf<String>()
@@ -449,8 +592,20 @@ class MainActivity : FlutterActivity() {
                     
                     // Query all files in the directory
                     // Note: On Android 10+, MediaStore may not return all files due to scoped storage
-                    val selection = "${MediaStore.Files.FileColumns.DATA} LIKE ?"
-                    val selectionArgs = arrayOf("$directoryPath/%")
+                    // For Downloads root, we need to query more broadly
+                    val selection = if (isDownloadsRoot) {
+                        // For Downloads root, query all files in Downloads directory
+                        "${MediaStore.Files.FileColumns.DATA} LIKE ? OR ${MediaStore.Files.FileColumns.DATA} = ?"
+                    } else {
+                        "${MediaStore.Files.FileColumns.DATA} LIKE ?"
+                    }
+                    val selectionArgs = if (isDownloadsRoot) {
+                        arrayOf("$directoryPath/%", directoryPath)
+                    } else {
+                        arrayOf("$directoryPath/%")
+                    }
+                    
+                    android.util.Log.d("SAF", "MediaStore query - selection: $selection, args: ${selectionArgs.joinToString()}")
                     
                     val mediaCursor = contentResolver.query(
                         MediaStore.Files.getContentUri("external"),
@@ -559,10 +714,45 @@ class MainActivity : FlutterActivity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         
+        android.util.Log.d("SAF", "=== onActivityResult called ===")
+        android.util.Log.d("SAF", "Request code: $requestCode (expected: $FILE_PICKER_REQUEST_CODE or $DIRECTORY_PICKER_REQUEST_CODE)")
+        android.util.Log.d("SAF", "Result code: $resultCode (RESULT_OK=${Activity.RESULT_OK}, RESULT_CANCELED=${Activity.RESULT_CANCELED})")
+        android.util.Log.d("SAF", "Data: $data")
+        android.util.Log.d("SAF", "Pending file picker result: ${pendingFilePickerResult != null}")
+        android.util.Log.d("SAF", "Pending directory picker result: ${pendingDirectoryPickerResult != null}")
+        
         if (requestCode == FILE_PICKER_REQUEST_CODE) {
+            android.util.Log.d("SAF", "File picker request code matches!")
+            android.util.Log.d("SAF", "File picker result received - resultCode: $resultCode")
             if (resultCode == Activity.RESULT_OK && data != null) {
-                val uri = data.data
+                var uri = data.data
+                android.util.Log.d("SAF", "File picker returned URI: $uri")
                 if (uri != null && pendingFilePickerResult != null) {
+                    android.util.Log.d("SAF", "URI authority: ${uri.authority}")
+                    
+                    // Convert Downloads provider URI to external storage provider URI
+                    // This bypasses Android 11+ restrictions on Downloads provider
+                    if (uri.authority == "com.android.providers.downloads.documents") {
+                        android.util.Log.d("SAF", "Downloads provider detected, converting to external storage provider")
+                        try {
+                            val convertedUri = convertDownloadsProviderToExternalStorage(uri)
+                            if (convertedUri != null) {
+                                android.util.Log.d("SAF", "Successfully converted URI from Downloads provider to external storage provider")
+                                android.util.Log.d("SAF", "Original: $uri")
+                                android.util.Log.d("SAF", "Converted: $convertedUri")
+                                uri = convertedUri
+                            } else {
+                                android.util.Log.w("SAF", "Could not convert Downloads provider URI, using original")
+                            }
+                        } catch (e: Exception) {
+                            android.util.Log.e("SAF", "Error during conversion: ${e.message}", e)
+                            e.printStackTrace()
+                            // Continue with original URI if conversion fails
+                        }
+                    } else {
+                        android.util.Log.d("SAF", "Not Downloads provider, using URI as-is")
+                    }
+                    
                     // Take persistable URI permission for the picked file
                     // This allows us to access the file and its parent directory later
                     try {
@@ -576,14 +766,17 @@ class MainActivity : FlutterActivity() {
                         // Continue anyway - some URIs might not support persistable permissions
                     }
                     
-                    // Return the original SAF URI
+                    // Return the URI (converted if needed)
+                    android.util.Log.d("SAF", "Returning URI to Flutter: $uri")
                     pendingFilePickerResult?.success(uri.toString())
                     pendingFilePickerResult = null
                 } else {
+                    android.util.Log.e("SAF", "URI is null or pendingFilePickerResult is null")
                     pendingFilePickerResult?.error("ERROR", "No file selected", null)
                     pendingFilePickerResult = null
                 }
             } else {
+                android.util.Log.w("SAF", "File picker cancelled or no data - resultCode: $resultCode")
                 pendingFilePickerResult?.error("ERROR", "File picker cancelled", null)
                 pendingFilePickerResult = null
             }
@@ -825,6 +1018,18 @@ class MainActivity : FlutterActivity() {
                 }
             }
             
+            // For Downloads provider, try to convert to external storage provider URI
+            // This works better on Android 11+ where Downloads provider is restricted
+            if (fileUri.authority == "com.android.providers.downloads.documents") {
+                android.util.Log.d("SAF", "Downloads provider detected, attempting to convert to external storage provider")
+                val externalStorageUri = convertDownloadsProviderToExternalStorage(fileUri)
+                if (externalStorageUri != null) {
+                    android.util.Log.d("SAF", "Converted to external storage URI: $externalStorageUri")
+                    // Recursively call with the converted URI
+                    return getParentDirectoryUriFromFile(externalStorageUri.toString())
+                }
+            }
+            
             // For external storage documents, build parent tree URI from document ID
             if (fileUri.authority == "com.android.externalstorage.documents") {
                 android.util.Log.d("SAF", "Building parent tree URI for external storage")
@@ -835,7 +1040,7 @@ class MainActivity : FlutterActivity() {
                 }
             }
             
-            // If DocumentFile doesn't work, try to build tree URI from document ID
+            // If DocumentFile doesn't work, try to build tree URI from document ID (Downloads provider fallback)
             if (fileUri.authority == "com.android.providers.downloads.documents") {
                 val docId = DocumentsContract.getDocumentId(fileUri)
                 if (docId.startsWith("raw:/")) {
@@ -970,6 +1175,77 @@ class MainActivity : FlutterActivity() {
             }
         } catch (e: Exception) {
             android.util.Log.e("SAF", "Error finding matching tree permission: ${e.message}", e)
+        }
+        return null
+    }
+    
+    /**
+     * Convert Downloads provider URI to external storage provider URI
+     * This helps bypass Android 11+ restrictions on Downloads provider
+     */
+    private fun convertDownloadsProviderToExternalStorage(downloadsUri: Uri): Uri? {
+        try {
+            android.util.Log.d("SAF", "Converting Downloads provider URI: $downloadsUri")
+            val docId = DocumentsContract.getDocumentId(downloadsUri)
+            android.util.Log.d("SAF", "Downloads provider document ID: $docId")
+            
+            // Downloads provider uses formats like:
+            // - "raw:/storage/emulated/0/Download/folder/file.json"
+            // - "msf:downloads" (for Downloads root)
+            // - "downloads" (for Downloads root)
+            
+            if (docId.startsWith("raw:/")) {
+                // Extract the path: "/storage/emulated/0/Download/folder/file.json"
+                val filePath = docId.substring(4) // Remove "raw:" prefix
+                android.util.Log.d("SAF", "File path from Downloads provider: $filePath")
+                
+                // Convert to external storage document ID format: "primary:Download/folder/file.json"
+                // External storage uses "primary:" prefix for internal storage
+                // Handle both "Download" and "Downloads" folder names
+                val relativePath = if (filePath.startsWith("/storage/emulated/0/")) {
+                    filePath.replace("/storage/emulated/0/", "")
+                } else if (filePath.startsWith("/storage/emulated/0")) {
+                    filePath.replace("/storage/emulated/0", "")
+                } else {
+                    // If path doesn't start with expected prefix, try to extract from Download/Downloads
+                    val downloadIndex = filePath.indexOf("/Download")
+                    if (downloadIndex >= 0) {
+                        filePath.substring(downloadIndex + 1) // Remove leading "/"
+                    } else {
+                        val downloadsIndex = filePath.indexOf("/Downloads")
+                        if (downloadsIndex >= 0) {
+                            filePath.substring(downloadsIndex + 1).replace("Downloads", "Download")
+                        } else {
+                            filePath
+                        }
+                    }
+                }
+                
+                val externalDocId = "primary:$relativePath"
+                android.util.Log.d("SAF", "Converted to external storage document ID: $externalDocId")
+                
+                // Build external storage document URI
+                val externalUri = DocumentsContract.buildDocumentUri(
+                    "com.android.externalstorage.documents",
+                    externalDocId
+                )
+                android.util.Log.d("SAF", "Successfully converted to external storage URI: $externalUri")
+                return externalUri
+            } else if (docId == "downloads" || docId == "msf:downloads" || docId.contains("downloads")) {
+                // Downloads root - convert to external storage Downloads
+                val externalDocId = "primary:Download"
+                val externalUri = DocumentsContract.buildDocumentUri(
+                    "com.android.externalstorage.documents",
+                    externalDocId
+                )
+                android.util.Log.d("SAF", "Converted Downloads root to external storage URI: $externalUri")
+                return externalUri
+            } else {
+                android.util.Log.w("SAF", "Unknown Downloads provider document ID format: $docId")
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("SAF", "Error converting Downloads provider to external storage: ${e.message}", e)
+            e.printStackTrace()
         }
         return null
     }
