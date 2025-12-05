@@ -114,8 +114,22 @@ This project implements a **Storage Access Framework (SAF)** based file picking 
 
 **Workaround:**
 - ✅ Navigate through **Mobile → Download → [subfolder]** instead
-- ✅ File picker automatically opens in Mobile → Download folder
+- ✅ File picker automatically opens in Mobile → Download folder (Android 8-12)
+- ✅ On Android 13+, user navigates manually (EXTRA_INITIAL_URI skipped to avoid empty screen)
 - ✅ Automatic URI conversion handles the difference transparently
+
+### ❌ 1a. EXTRA_INITIAL_URI on Android 13+
+**Status:** Causes Empty Screen on Android 13+
+
+**Why:**
+- Android 13+ (API 33+) has a bug/restriction where `EXTRA_INITIAL_URI` with document URIs causes the file picker to show an empty screen
+- This is a **system-level issue** with Android 13's file picker implementation
+
+**Workaround:**
+- ✅ Skip `EXTRA_INITIAL_URI` on Android 13+
+- ✅ File picker opens normally (user navigates manually)
+- ✅ All other functionality works correctly
+- ✅ User instructions guide to Mobile → Download path
 
 **Technical Details:**
 ```kotlin
@@ -314,10 +328,23 @@ Try Direct Parent Access (DocumentFile API)
 - ✅ **Downloads Subfolders:** Accessible via Mobile → Download path
 - ✅ **Subfolders:** Works with URI conversion
 
-### Android 12+ (API 31+)
+### Android 12 (API 31)
 - Same as Android 11
 - ✅ All features work the same way
 - ✅ URI conversion still required
+
+### Android 13 (API 33)
+- ⚠️ **EXTRA_INITIAL_URI:** May cause empty screen issue
+- ✅ **File Picker:** Works without EXTRA_INITIAL_URI
+- ✅ **Downloads Subfolders:** Accessible via Mobile → Download path
+- ⚠️ **Navigation:** User needs to navigate manually (EXTRA_INITIAL_URI skipped)
+- ✅ **URI Conversion:** Still works for file access
+- ✅ **Package Visibility:** Requires queries in AndroidManifest.xml
+
+**Special Handling:**
+- EXTRA_INITIAL_URI is skipped on Android 13+ to avoid empty screen
+- File picker opens normally, user navigates to Mobile → Download manually
+- All other functionality works the same as Android 11/12
 
 ---
 
@@ -464,4 +491,5 @@ This implementation successfully provides file access functionality using SAF wh
 **Document Version:** 1.0  
 **Last Updated:** 2025  
 **Compatible Android Versions:** 9.0 (API 28) and above
+
 

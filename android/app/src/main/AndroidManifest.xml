@@ -41,5 +41,23 @@
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
         </intent>
+        <!-- Required for ACTION_OPEN_DOCUMENT to work properly on Android 11+ -->
+        <intent>
+            <action android:name="android.intent.action.OPEN_DOCUMENT"/>
+            <category android:name="android.intent.category.OPENABLE"/>
+        </intent>
+        <!-- Required for ACTION_GET_CONTENT to work properly on Android 11+ (used on Android 13+) -->
+        <intent>
+            <action android:name="android.intent.action.GET_CONTENT"/>
+            <category android:name="android.intent.category.OPENABLE"/>
+        </intent>
+        <!-- Required for ACTION_OPEN_DOCUMENT_TREE to work properly on Android 11+ -->
+        <intent>
+            <action android:name="android.intent.action.OPEN_DOCUMENT_TREE"/>
+        </intent>
+        <!-- Package visibility for external storage provider (Android 11+) -->
+        <package android:name="com.android.externalstorage" />
+        <!-- Package visibility for downloads provider (Android 11+) -->
+        <package android:name="com.android.providers.downloads" />
     </queries>
 </manifest>

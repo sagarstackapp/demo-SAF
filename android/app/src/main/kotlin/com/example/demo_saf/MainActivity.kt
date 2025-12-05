@@ -28,47 +28,65 @@ class MainActivity : FlutterActivity() {
     
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         super.onCreate(savedInstanceState)
-        android.util.Log.d("SAF", "MainActivity onCreate")
+        android.util.Log.d("SAF_DEBUG", "=== MainActivity onCreate ===")
+        android.util.Log.d("SAF_DEBUG", "Saved instance state: ${savedInstanceState != null}")
+        if (savedInstanceState != null) {
+            android.util.Log.d("SAF_DEBUG", "Activity is being recreated from saved state")
+            android.util.Log.d("SAF_DEBUG", "This might cause pendingFilePickerResult to be lost!")
+        }
     }
     
     override fun onResume() {
         super.onResume()
-        android.util.Log.d("SAF", "MainActivity onResume")
+        android.util.Log.d("SAF_DEBUG", "=== MainActivity onResume ===")
+        android.util.Log.d("SAF_DEBUG", "Pending file picker result: ${pendingFilePickerResult != null}")
+        android.util.Log.d("SAF_DEBUG", "Pending directory picker result: ${pendingDirectoryPickerResult != null}")
+        
         // Check if we have pending results that might have been lost
         // If we come back from file picker and no result was received, it was likely cancelled
         if (pendingFilePickerResult != null) {
-            android.util.Log.d("SAF", "Pending file picker result exists on resume - checking if picker was cancelled")
+            android.util.Log.d("SAF_DEBUG", "Pending file picker result exists on resume")
+            android.util.Log.d("SAF_DEBUG", "Waiting to see if onActivityResult gets called...")
+            
             // Wait a bit to see if onActivityResult gets called
             android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                 if (pendingFilePickerResult != null) {
-                    android.util.Log.w("SAF", "File picker result still pending after resume delay - likely cancelled")
-                    // Don't error here - let onActivityResult handle it if it comes
+                    android.util.Log.w("SAF_DEBUG", "WARNING: File picker result still pending after resume delay")
+                    android.util.Log.w("SAF_DEBUG", "This means onActivityResult was NOT called - user likely cancelled")
+                    android.util.Log.w("SAF_DEBUG", "OR there's an issue with activity result handling")
+                    // Don't error here automatically - user might have cancelled
+                    // But log it so we can see what's happening
+                } else {
+                    android.util.Log.d("SAF_DEBUG", "File picker result was handled (pendingFilePickerResult is now null)")
                 }
-            }, 500)
+            }, 1500) // Wait 1.5 seconds for onActivityResult
         }
         if (pendingDirectoryPickerResult != null) {
-            android.util.Log.d("SAF", "Pending directory picker result exists on resume")
+            android.util.Log.d("SAF_DEBUG", "Pending directory picker result exists on resume")
         }
     }
     
     override fun onPause() {
         super.onPause()
-        android.util.Log.d("SAF", "MainActivity onPause")
+        android.util.Log.d("SAF_DEBUG", "MainActivity onPause")
+        android.util.Log.d("SAF_DEBUG", "Pending file picker result on pause: ${pendingFilePickerResult != null}")
+        android.util.Log.d("SAF_DEBUG", "Pending directory picker result on pause: ${pendingDirectoryPickerResult != null}")
     }
     
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        android.util.Log.d("SAF", "MainActivity onNewIntent: $intent")
+        android.util.Log.d("SAF_DEBUG", "MainActivity onNewIntent: $intent")
+        setIntent(intent) // Important: update the intent for singleTop activities
     }
     
     override fun onSaveInstanceState(outState: android.os.Bundle) {
         super.onSaveInstanceState(outState)
-        android.util.Log.d("SAF", "MainActivity onSaveInstanceState")
+        android.util.Log.d("SAF_DEBUG", "MainActivity onSaveInstanceState")
     }
     
     override fun onRestoreInstanceState(savedInstanceState: android.os.Bundle) {
         super.onRestoreInstanceState(savedInstanceState)
-        android.util.Log.d("SAF", "MainActivity onRestoreInstanceState")
+        android.util.Log.d("SAF_DEBUG", "MainActivity onRestoreInstanceState")
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -119,41 +137,83 @@ class MainActivity : FlutterActivity() {
                     // Navigate directly to Mobile/Download to avoid Downloads side menu restrictions
                     try {
                         android.util.Log.d("SAF", "Setting up file picker - pendingFilePickerResult set")
+                        android.util.Log.d("SAF", "Android version: ${Build.VERSION.SDK_INT} (Android ${Build.VERSION.RELEASE})")
                         pendingFilePickerResult = result
                         
-                        // Build URI for Mobile/Download path (external storage)
-                        // This bypasses the Downloads side menu which is restricted on Android 11+
-                        val downloadUri = try {
-                            // External storage Downloads folder: "primary:Download"
-                            DocumentsContract.buildDocumentUri(
-                                "com.android.externalstorage.documents",
-                                "primary:Download"
-                            )
-                        } catch (e: Exception) {
-                            android.util.Log.w("SAF", "Could not build Download URI: ${e.message}")
-                            null
-                        }
-                        
-                        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                            addCategory(Intent.CATEGORY_OPENABLE)
-                            type = "*/*" // Allow all file types
+                        val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            // Android 13+ - Try ACTION_OPEN_DOCUMENT_TREE approach (as suggested by Gemini)
+                            // This is more reliable on Android 13+ for accessing Downloads folder
+                            // User will select Downloads folder, then we can access files within it
+                            android.util.Log.d("SAF", "Android 13+ detected - using ACTION_OPEN_DOCUMENT_TREE approach")
                             
-                            // Navigate directly to Mobile/Download folder
-                            // This avoids the Downloads side menu which shows empty folders on Android 11+
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && downloadUri != null) {
+                            Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                                // Grant permissions for persistent access
+                                flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                                
+                                // Try to set EXTRA_INITIAL_URI to Downloads folder for better UX
+                                // This guides user to Downloads folder, but may not work on all devices
                                 try {
-                                    putExtra(DocumentsContract.EXTRA_INITIAL_URI, downloadUri)
-                                    android.util.Log.d("SAF", "Set EXTRA_INITIAL_URI to navigate to Mobile/Download: $downloadUri")
+                                    val downloadUri = DocumentsContract.buildDocumentUri(
+                                        "com.android.externalstorage.documents",
+                                        "primary:Download"
+                                    )
+                                    if (downloadUri != null) {
+                                        putExtra(DocumentsContract.EXTRA_INITIAL_URI, downloadUri)
+                                        android.util.Log.d("SAF", "Set EXTRA_INITIAL_URI to navigate to Mobile/Download: $downloadUri")
+                                    } else {
+                                        android.util.Log.w("SAF", "Could not build Download URI for EXTRA_INITIAL_URI")
+                                    }
                                 } catch (e: Exception) {
                                     android.util.Log.w("SAF", "Could not set EXTRA_INITIAL_URI: ${e.message}")
+                                    android.util.Log.d("SAF", "Continuing without EXTRA_INITIAL_URI - user will navigate manually")
+                                    // Continue without EXTRA_INITIAL_URI - user will need to navigate to Downloads manually
+                                }
+                                
+                                android.util.Log.d("SAF", "Intent configured with ACTION_OPEN_DOCUMENT_TREE for Android 13")
+                                
+                                // Verify intent can be resolved
+                                val resolveInfo = packageManager.resolveActivity(this, PackageManager.MATCH_DEFAULT_ONLY)
+                                if (resolveInfo == null) {
+                                    android.util.Log.e("SAF", "ACTION_OPEN_DOCUMENT_TREE cannot be resolved!")
+                                } else {
+                                    android.util.Log.d("SAF", "ACTION_OPEN_DOCUMENT_TREE can be resolved: ${resolveInfo.activityInfo.packageName}/${resolveInfo.activityInfo.name}")
+                                }
+                            }
+                        } else {
+                            // Android 8-12 - Use standard setup with EXTRA_INITIAL_URI
+                            Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                                addCategory(Intent.CATEGORY_OPENABLE)
+                                type = "*/*" // Allow all file types
+                                
+                                // Build URI for Mobile/Download path (external storage)
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                    try {
+                                        val downloadUri = DocumentsContract.buildDocumentUri(
+                                            "com.android.externalstorage.documents",
+                                            "primary:Download"
+                                        )
+                                        if (downloadUri != null) {
+                                            putExtra(DocumentsContract.EXTRA_INITIAL_URI, downloadUri)
+                                            android.util.Log.d("SAF", "Set EXTRA_INITIAL_URI to navigate to Mobile/Download: $downloadUri")
+                                        }
+                                    } catch (e: Exception) {
+                                        android.util.Log.w("SAF", "Could not set EXTRA_INITIAL_URI: ${e.message}")
+                                    }
                                 }
                             }
                         }
+                        
                         android.util.Log.d("SAF", "Starting file picker activity with request code: $FILE_PICKER_REQUEST_CODE")
+                        android.util.Log.d("SAF", "Intent action: ${intent.action}")
+                        android.util.Log.d("SAF", "Intent type: ${intent.type}")
+                        android.util.Log.d("SAF", "Intent categories: ${intent.categories}")
+                        android.util.Log.d("SAF", "Intent extras: ${intent.extras}")
+                        
                         startActivityForResult(intent, FILE_PICKER_REQUEST_CODE)
                         android.util.Log.d("SAF", "File picker activity started")
                     } catch (e: Exception) {
                         android.util.Log.e("SAF", "Error starting file picker: ${e.message}", e)
+                        e.printStackTrace()
                         result.error("ERROR", "Failed to start file picker: ${e.message}", null)
                         pendingFilePickerResult = null
                     }
@@ -175,14 +235,20 @@ class MainActivity : FlutterActivity() {
                 "listFilesInDirectory" -> {
                     // List all files in a directory tree URI
                     val directoryUri = call.argument<String>("directoryUri")
+                    android.util.Log.d("SAF_DEBUG", "=== listFilesInDirectory called ===")
+                    android.util.Log.d("SAF_DEBUG", "Directory URI argument: $directoryUri")
                     if (directoryUri != null) {
                         try {
                             val files = listFilesInDirectoryTree(directoryUri)
+                            android.util.Log.d("SAF_DEBUG", "listFilesInDirectoryTree returned ${files.size} files")
                             result.success(files)
                         } catch (e: Exception) {
+                            android.util.Log.e("SAF_DEBUG", "ERROR in listFilesInDirectory: ${e.message}", e)
+                            e.printStackTrace()
                             result.error("ERROR", "Failed to list files: ${e.message}", null)
                         }
                     } else {
+                        android.util.Log.e("SAF_DEBUG", "ERROR: Directory URI is null")
                         result.error("ERROR", "Directory URI is null", null)
                     }
                 }
@@ -714,22 +780,52 @@ class MainActivity : FlutterActivity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         
-        android.util.Log.d("SAF", "=== onActivityResult called ===")
-        android.util.Log.d("SAF", "Request code: $requestCode (expected: $FILE_PICKER_REQUEST_CODE or $DIRECTORY_PICKER_REQUEST_CODE)")
-        android.util.Log.d("SAF", "Result code: $resultCode (RESULT_OK=${Activity.RESULT_OK}, RESULT_CANCELED=${Activity.RESULT_CANCELED})")
-        android.util.Log.d("SAF", "Data: $data")
-        android.util.Log.d("SAF", "Pending file picker result: ${pendingFilePickerResult != null}")
-        android.util.Log.d("SAF", "Pending directory picker result: ${pendingDirectoryPickerResult != null}")
+        android.util.Log.d("SAF_DEBUG", "=== onActivityResult called ===")
+        android.util.Log.d("SAF_DEBUG", "Request code: $requestCode (expected: $FILE_PICKER_REQUEST_CODE or $DIRECTORY_PICKER_REQUEST_CODE)")
+        android.util.Log.d("SAF_DEBUG", "Result code: $resultCode (RESULT_OK=${Activity.RESULT_OK}, RESULT_CANCELED=${Activity.RESULT_CANCELED})")
+        android.util.Log.d("SAF_DEBUG", "Data: $data")
+        android.util.Log.d("SAF_DEBUG", "Data URI: ${data?.data}")
+        android.util.Log.d("SAF_DEBUG", "Data type: ${data?.type}")
+        android.util.Log.d("SAF_DEBUG", "Pending file picker result: ${pendingFilePickerResult != null}")
+        android.util.Log.d("SAF_DEBUG", "Pending directory picker result: ${pendingDirectoryPickerResult != null}")
         
         if (requestCode == FILE_PICKER_REQUEST_CODE) {
-            android.util.Log.d("SAF", "File picker request code matches!")
-            android.util.Log.d("SAF", "File picker result received - resultCode: $resultCode")
+            android.util.Log.d("SAF_DEBUG", "File picker request code matches!")
+            android.util.Log.d("SAF_DEBUG", "File picker result received - resultCode: $resultCode")
             if (resultCode == Activity.RESULT_OK && data != null) {
                 var uri = data.data
-                android.util.Log.d("SAF", "File picker returned URI: $uri")
+                android.util.Log.d("SAF_DEBUG", "File picker returned URI: $uri")
                 if (uri != null && pendingFilePickerResult != null) {
-                    android.util.Log.d("SAF", "URI authority: ${uri.authority}")
+                    android.util.Log.d("SAF_DEBUG", "URI authority: ${uri.authority}")
+                    android.util.Log.d("SAF_DEBUG", "Is tree URI: ${DocumentsContract.isTreeUri(uri)}")
                     
+                    // On Android 13+, we use ACTION_OPEN_DOCUMENT_TREE which returns a tree URI
+                    // We need to handle this differently - get the tree URI and then list files
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && DocumentsContract.isTreeUri(uri)) {
+                        android.util.Log.d("SAF_DEBUG", "Android 13+ tree URI detected - this is from ACTION_OPEN_DOCUMENT_TREE")
+                        android.util.Log.d("SAF_DEBUG", "Tree URI: $uri")
+                        
+                        // Take persistable URI permission for the tree
+                        try {
+                            contentResolver.takePersistableUriPermission(
+                                uri,
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION
+                            )
+                            android.util.Log.d("SAF_DEBUG", "Persistent permission granted for tree: $uri")
+                        } catch (e: Exception) {
+                            android.util.Log.e("SAF_DEBUG", "Could not take persistable permission for tree: ${e.message}", e)
+                        }
+                        
+                        // For Android 13+, return the tree URI
+                        // The Dart side will detect it's a tree URI and call listFilesInDirectory
+                        android.util.Log.d("SAF_DEBUG", "Returning tree URI to Flutter (Android 13+): $uri")
+                        android.util.Log.d("SAF_DEBUG", "Dart side will detect tree URI and call listFilesInDirectory")
+                        pendingFilePickerResult?.success(uri.toString())
+                        pendingFilePickerResult = null
+                        return
+                    }
+                    
+                    // For Android < 13, handle file URI as before
                     // Convert Downloads provider URI to external storage provider URI
                     // This bypasses Android 11+ restrictions on Downloads provider
                     if (uri.authority == "com.android.providers.downloads.documents") {
@@ -754,7 +850,8 @@ class MainActivity : FlutterActivity() {
                     }
                     
                     // Take persistable URI permission for the picked file
-                    // This allows us to access the file and its parent directory later
+                    // This is CRITICAL for Android 13+ - according to Android docs, we MUST persist permissions
+                    // ACTION_OPEN_DOCUMENT provides persistable URIs, so this should work
                     try {
                         contentResolver.takePersistableUriPermission(
                             uri,
@@ -762,8 +859,11 @@ class MainActivity : FlutterActivity() {
                         )
                         android.util.Log.d("SAF", "Persistent permission granted for picked file: $uri")
                     } catch (e: Exception) {
-                        android.util.Log.w("SAF", "Could not take persistable permission: ${e.message}")
-                        // Continue anyway - some URIs might not support persistable permissions
+                        android.util.Log.e("SAF", "CRITICAL: Could not take persistable permission: ${e.message}")
+                        android.util.Log.e("SAF", "This means the file access will be temporary - app restart will lose access")
+                        e.printStackTrace()
+                        // Continue anyway - we'll still have temporary access, but this is not ideal
+                        // According to Android docs, ACTION_OPEN_DOCUMENT should support persistable permissions
                     }
                     
                     // Return the URI (converted if needed)
@@ -813,64 +913,52 @@ class MainActivity : FlutterActivity() {
     private fun listFilesInDirectoryTree(treeUriString: String): List<String> {
         val files = mutableListOf<String>()
         try {
-            val requestedUri = Uri.parse(treeUriString)
-            android.util.Log.d("SAF", "Listing files in directory tree: $requestedUri")
+            val treeUri = Uri.parse(treeUriString)
+            android.util.Log.d("SAF_DEBUG", "=== Starting listFilesInDirectoryTree ===")
+            android.util.Log.d("SAF_DEBUG", "Tree URI received: $treeUri")
             
-            // Check if we have an existing tree permission that covers this directory
-            val matchingTreeUri = findMatchingTreePermission(requestedUri)
-            
-            // Ensure we have a tree URI
-            val actualTreeUri = if (DocumentsContract.isTreeUri(requestedUri)) {
-                requestedUri
-            } else {
-                // Try to convert document URI to tree URI
-                convertDocumentUriToTreeUri(requestedUri) ?: requestedUri
+            // Verify it's a tree URI
+            if (!DocumentsContract.isTreeUri(treeUri)) {
+                android.util.Log.e("SAF_DEBUG", "ERROR: URI is not a tree URI: $treeUri")
+                return emptyList()
             }
             
-            // Use matching tree URI if available (might be Downloads root covering subfolders)
-            val treeUriToUse = matchingTreeUri ?: actualTreeUri
+            // Use DocumentFile API as primary method - it handles ExternalStorageProvider errors better
+            // ContentResolver.query can fail with ExternalStorageProvider issues (like /storage/emulated errors)
+            android.util.Log.d("SAF_DEBUG", "Using DocumentFile API (more reliable for ExternalStorageProvider)")
+            return listFilesUsingDocumentFile(treeUri)
             
-            android.util.Log.d("SAF", "Using tree URI: $treeUriToUse")
-            
-            // Use DocumentFile to access the tree
-            val treeDocumentFile = DocumentFile.fromTreeUri(this, treeUriToUse)
+        } catch (e: Exception) {
+            android.util.Log.e("SAF_DEBUG", "ERROR in listFilesInDirectoryTree: ${e.message}", e)
+            e.printStackTrace()
+            return emptyList()
+        }
+    }
+    
+    /**
+     * Primary method using DocumentFile API - handles ExternalStorageProvider better
+     */
+    private fun listFilesUsingDocumentFile(treeUri: Uri): List<String> {
+        val files = mutableListOf<String>()
+        try {
+            android.util.Log.d("SAF_DEBUG", "Using DocumentFile fallback for: $treeUri")
+            val treeDocumentFile = DocumentFile.fromTreeUri(this, treeUri)
             if (treeDocumentFile == null || !treeDocumentFile.exists()) {
-                android.util.Log.e("SAF", "Tree URI is invalid or doesn't exist")
+                android.util.Log.e("SAF_DEBUG", "DocumentFile is null or doesn't exist")
                 return emptyList()
             }
             
             if (!treeDocumentFile.isDirectory) {
-                android.util.Log.e("SAF", "Tree URI is not a directory")
+                android.util.Log.e("SAF_DEBUG", "DocumentFile is not a directory")
                 return emptyList()
             }
             
-            android.util.Log.d("SAF", "Tree directory exists: ${treeDocumentFile.name}, canRead: ${treeDocumentFile.canRead()}")
-            
-            // If we're using a parent tree (e.g., Downloads root) but need to access a subfolder,
-            // we need to navigate to the subfolder first
-            val targetDirectory = if (matchingTreeUri != null && matchingTreeUri != actualTreeUri) {
-                // We have Downloads root access but need to access a subfolder
-                // Try to find the subfolder within the tree
-                val targetDocId = if (DocumentsContract.isTreeUri(requestedUri)) {
-                    DocumentsContract.getTreeDocumentId(requestedUri)
-                } else {
-                    DocumentsContract.getDocumentId(requestedUri)
-                }
-                
-                // Navigate to the subfolder within the tree
-                findSubfolderInTree(treeDocumentFile, targetDocId) ?: treeDocumentFile
-            } else {
-                treeDocumentFile
-            }
-            
-            // List all files recursively (including subfolders)
-            listFilesRecursive(targetDirectory, files)
-            
-            android.util.Log.d("SAF", "Found ${files.size} files in directory tree")
+            android.util.Log.d("SAF_DEBUG", "DocumentFile directory exists: ${treeDocumentFile.name}")
+            listFilesRecursive(treeDocumentFile, files)
+            android.util.Log.d("SAF_DEBUG", "DocumentFile found ${files.size} files")
             return files
         } catch (e: Exception) {
-            android.util.Log.e("SAF", "Error listing files: ${e.message}", e)
-            e.printStackTrace()
+            android.util.Log.e("SAF_DEBUG", "ERROR in DocumentFile fallback: ${e.message}", e)
             return emptyList()
         }
     }
@@ -953,36 +1041,43 @@ class MainActivity : FlutterActivity() {
 
     private fun listFilesRecursive(documentFile: DocumentFile, files: MutableList<String>) {
         try {
-            if (!documentFile.exists() || !documentFile.canRead()) {
-                android.util.Log.w("SAF", "Cannot read directory: ${documentFile.name}")
+            if (!documentFile.exists()) {
+                android.util.Log.w("SAF_DEBUG", "Cannot read directory (doesn't exist): ${documentFile.name}")
                 return
             }
             
+            if (!documentFile.canRead()) {
+                android.util.Log.w("SAF_DEBUG", "Cannot read directory (no permission): ${documentFile.name}")
+                return
+            }
+            
+            android.util.Log.d("SAF_DEBUG", "Listing files in directory: ${documentFile.name}")
             val children = documentFile.listFiles()
+            
             if (children != null) {
-                android.util.Log.d("SAF", "Listing ${children.size} items in: ${documentFile.name}")
+                android.util.Log.d("SAF_DEBUG", "Found ${children.size} items in: ${documentFile.name}")
                 for (child in children) {
                     try {
                         if (child.isFile) {
                             // Add file URI
                             files.add(child.uri.toString())
-                            android.util.Log.d("SAF", "Found file: ${child.name}")
+                            android.util.Log.i("SAF_RESULT", "Found file: ${child.name}")
                         } else if (child.isDirectory) {
-                            android.util.Log.d("SAF", "Entering subdirectory: ${child.name}")
+                            android.util.Log.d("SAF_DEBUG", "Entering subdirectory: ${child.name}")
                             // Recursively list files in subdirectories
                             // This is crucial for accessing files in subfolders
                             listFilesRecursive(child, files)
                         }
                     } catch (e: Exception) {
-                        android.util.Log.w("SAF", "Error processing item ${child.name}: ${e.message}")
+                        android.util.Log.w("SAF_DEBUG", "Error processing item ${child.name}: ${e.message}")
                         // Continue with next item instead of stopping
                     }
                 }
             } else {
-                android.util.Log.w("SAF", "listFiles() returned null for: ${documentFile.name}")
+                android.util.Log.w("SAF_DEBUG", "listFiles() returned null for: ${documentFile.name}")
             }
         } catch (e: Exception) {
-            android.util.Log.e("SAF", "Error listing files recursively in ${documentFile.name}: ${e.message}", e)
+            android.util.Log.e("SAF_DEBUG", "Error listing files recursively in ${documentFile.name}: ${e.message}", e)
             // Don't throw - just log and continue
         }
     }

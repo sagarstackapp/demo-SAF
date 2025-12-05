@@ -239,7 +239,64 @@ class SafService {
 
       print('File URI received: $fileUri');
 
-      // Step 2: Read the JSON file
+      // Check if this is a tree URI (Android 13+ uses ACTION_OPEN_DOCUMENT_TREE)
+      // Tree URIs typically contain ":tree/" in the path
+      bool isTreeUri = fileUri.contains(':tree/');
+      List<String> allFiles = [];
+      
+      if (isTreeUri) {
+        print('Tree URI detected (Android 13+) - listing files in tree...');
+        // On Android 13+, we got a tree URI (folder), not a file URI
+        // List all files in this tree and pick the first JSON file
+        allFiles = await listFilesInDirectory(fileUri);
+        print('Found ${allFiles.length} files in tree');
+        
+        // Find the first JSON file
+        String? jsonFileUri;
+        for (String file in allFiles) {
+          if (file.toLowerCase().endsWith('.json')) {
+            jsonFileUri = file;
+            print('Found JSON file in tree: $jsonFileUri');
+            break;
+          }
+        }
+        
+        if (jsonFileUri == null) {
+          return {
+            'success': false,
+            'error': 'No JSON file found in the selected folder. Please select a folder that contains a JSON file.',
+            'jsonData': null,
+            'files': allFiles,
+          };
+        }
+        
+        // Use the found JSON file
+        fileUri = jsonFileUri;
+        print('Using JSON file from tree: $fileUri');
+        
+        // For tree URIs, we already have all files, so skip the directory listing step
+        // Just read the JSON and return
+        print('Reading JSON file from tree...');
+        final jsonData = await readJsonFile(fileUri);
+        if (jsonData == null) {
+          return {
+            'success': false,
+            'error': 'Failed to read JSON file. Make sure you selected a valid JSON file.',
+            'jsonData': null,
+            'files': allFiles,
+          };
+        }
+        
+        return {
+          'success': true,
+          'error': null,
+          'jsonData': jsonData,
+          'files': allFiles,
+          'jsonFilePath': fileUri,
+        };
+      }
+
+      // Step 2: Read the JSON file (for non-tree URIs)
       print('Reading JSON file...');
       final jsonData = await readJsonFile(fileUri);
       if (jsonData == null) {
@@ -254,7 +311,7 @@ class SafService {
       // Step 3: Try to list files directly from the picked file's directory
       // This works because we already have access to the picked file
       print('Attempting to list files directly from picked file directory...');
-      List<String> allFiles = await getAllFilesFromDirectory(fileUri);
+      allFiles = await getAllFilesFromDirectory(fileUri);
       
       // Check if we only got the picked file itself (meaning parent access failed)
       bool onlyPickedFile = allFiles.length == 1 && allFiles.first == fileUri;
